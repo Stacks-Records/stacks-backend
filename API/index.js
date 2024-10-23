@@ -1,36 +1,45 @@
 const express = require('express');
 const app = express();
 const cors = require('cors');
-const { config } = require('dotenv');
-require('dotenv').config();
+const path = require('path')
+require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 
-const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
+const configuration = require('../knexfile.js')[process.env.NODE_ENV|| 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
 
-const port = process.env.PORT || 3001
-const jwtCheck = auth({
-    audience: 'https://stacksusers/api',
-    issuerBaseURL: 'https://dev-gniv73lrty2i6mv2.us.auth0.com/',
-    tokenSigningAlg: 'RS256'
-})
-app.use(express.json())
-app.use(jwtCheck);
+database.on('query', queryData => {
+    console.log('SQL:', queryData.sql);
+    console.log('Bindings:', queryData.bindings); // Optional: logs bindings too
+});
 app.use(cors({
     origin:'*',
-    methods:['GET', 'POST', 'DELETE', 'PUT'],
-    allowedHeaders: ['Content-Type']
+    methods:['GET', 'POST', 'DELETE', 'PUT', 'PATCH'],
+    allowedHeaders: ['Content-Type','Authorization','Email'],
+    credential: true
 }))
-app.locals.title = 'Stacks'
-app.get("/", (req, res) => res.send("Express on Vercel"));
 
+const port = process.env.PORT || 3001
+
+const checkJwt = auth({
+    audience: process.env.AUDIENCE,
+    issuerBaseURL: process.env.AUTH0_ISSUER_BASE_URL,
+  });
+  
+app.use(express.json())
+// app.use(checkJwt);
+
+app.locals.title = 'Stacks'
+
+app.get("/", (req, res) => res.send("Express on Vercel"));
 app.set('port', process.env.PORT);
-app.listen(port)
-console.log('Running on port ', port);
-app.get('/authorized', function (req, res) {
-    res.send('Secured Resource');
-});
+app.listen(port, () => {
+    console.log(`Listening on port: ${port}`)
+    console.log(`Current environment: ${process.env.NODE_ENV}`)
+})
+
 app.get('/albums', async (request, res) => {
+
     try {
         const albums = await database('albums').select()
         res.status(200).json(albums)
@@ -90,24 +99,31 @@ app.get('/api/v1/users', async (req, res)=> {
         if (!users.length) {
             res.status(200).json('No users found')
         }
-        res.status(200).json(users)
+        else {
+            res.status(200).json(users)
+        }
+        
     }
     catch (error) {
         res.status(500).json({error:'Could not fetch users'})
     }
 })
 
-app.post('/api/v1/users', async (req,res) => {
-    const { name, email} = req.body;
+app.post('/api/v1/users', checkJwt, async (req,res) => {
     try {
-        const users = await database('users').select('email')
+        const { name, email} = req.body;
+        const users = await database('users').select('*')
         const foundUser = users.find(user => {
-            user.name === name && user.email === email
+            return user.email === email
         })
-        if (!foundUser) {
+        if (foundUser === undefined) {
             const user = {name, email}
-            const newUser = database('users').insert(user);
-            res.status(201).json(newUser)
+            await database('users').insert({email: email, username: name, mystack: []});
+
+            res.status(201).json('User seeded')
+        }
+        else {
+            res.status(201).json('User already seeded')
         }
     }
     catch (error) {
@@ -115,5 +131,71 @@ app.post('/api/v1/users', async (req,res) => {
     }
 })
 
+//post route for users table adding an album to mystacks
+
+app.patch('/api/v1/stacks', checkJwt, async (req,res) => {
+    try {
+        const {email, newAlbum} = req.body;
+        const user = await database('users').select('*').where('email','=',email)
+        const userID = user[0].id
+        const foundRecord = user[0].mystack.find(album => album.id === newAlbum.id)
+        if (!foundRecord) {
+            await database('users')
+            .where('id', userID)
+            .update({
+                mystack: database.raw('array_append(mystack, ?::jsonb)', [JSON.stringify(newAlbum)])
+            })
+            .returning('*');
+            res.status(201).json('Album added to stack')
+        }
+        else {
+            res.status(200).json('Album already in stack')
+        }
+    }
+    catch (error) {
+        console.error('Error updating stack:', error);
+        res.status(500).json({error: 'Could not add album to stack'})
+    }
+})
+app.patch('/api/v1/stacks/delete', async (req,res) => {
+    try {
+        const {email, albumToDelete} = req.body;
+        const user = await database('users').select('*').where('email','=',email)
+        const userID = user[0].id
+        const foundRecord = user[0].mystack.find(album => album.id === albumToDelete.id)
+        if (foundRecord) {
+            const updatedUser = await database('users')
+            .where('id', userID)
+            .update({
+                mystack: database.raw('array_remove(mystack, ?::jsonb)', [JSON.stringify(albumToDelete)])
+            })
+            .returning('*');
+            res.status(201).json({message: 'Album removed from stack', user: updatedUser[0]})
+        }
+        else {
+            res.status(404).json({message: 'Album not found in stack'})
+        }
+    }
+    catch (error) {
+        console.error('Error updating stack:', error);
+        res.status(500).json({error: 'Could not remove album to stack'})
+    }
+})
+
+app.get('/api/v1/stacks', async (req,res) => {
+    try {
+        const email = req.headers.email;
+        const albums = await database('users').where('email',email).select('mystack')
+        if (!albums.length) {
+            res.status(201).json('No stack to display')
+        }
+        else {
+            res.status(201).json(albums)
+        }
+    }
+    catch (error) {
+        res.status(500).json({error: 'Could not get user stack'})
+    }
+})
 
 module.exports = app
