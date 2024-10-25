@@ -133,49 +133,49 @@ app.post('/api/v1/users', checkJwt, async (req, res) => {
 
 //post route for users table adding an album to mystacks
 
-// app.patch('/api/v1/stacks', checkJwt, async (req, res) => {
-//     try {
-//         const { email, newAlbum } = req.body;
-//         const user = await database('users').select('*').where('email', '=', email)
-//         const userID = user[0].id
-//         const foundRecord = user[0].mystack.find(album => album.id === newAlbum.id)
-//         if (!foundRecord) {
-//             await database('users')
-//                 .where('id', userID)
-//                 .update({
-//                     mystack: database.raw('array_append(mystack, ?::jsonb)', [JSON.stringify(newAlbum)])
-//                 })
-//                 .returning('*');
-//             res.status(201).json('Album added to stack')
-//         }
-//         else {
-//             res.status(200).json('Album already in stack')
-//         }
-//     }
-//     catch (error) {
-//         console.error('Error updating stack:', error);
-//         res.status(500).json({ error: 'Could not add album to stack' })
-//     }
-// })
-
-app.patch('/api/v1/stacks/:userId', checkJwt, async (req, res) => {
+app.patch('/api/v1/stacks', checkJwt, async (req, res) => {
     try {
-        const { userId } = req.params
-        const { albumId } = req.body
-        if(!userId || !albumId) {
-            res.status(400).json('User ID or Album ID not found.') 
+        const { email, newAlbum } = req.body;
+        const user = await database('users').select('*').where('email', '=', email)
+        const userID = user[0].id
+        const foundRecord = user[0].mystack.find(album => album.id === newAlbum.id)
+        if (!foundRecord) {
+            await database('users')
+                .where('id', userID)
+                .update({
+                    mystack: database.raw('array_append(mystack, ?::jsonb)', [JSON.stringify(newAlbum)])
+                })
+                .returning('*');
+            res.status(201).json('Album added to stack')
         }
-        const newAlbum = await database('user_albums').where('userId', '=', userId).select('*')
-            .update({
-                albumId: database.raw('array_append(albumId, ?::text)', [JSON.stringify(albumId)])
-            })
-          res.status(201).json({ message:'Album added to stack!', id: newAlbum })
+        else {
+            res.status(200).json('Album already in stack')
+        }
     }
-    catch(err) {
-        console.error('Error updating stack:', error)
-        res.status(500).json({error: 'Could not add album due to internal error.'})
+    catch (error) {
+        console.error('Error updating stack:', error);
+        res.status(500).json({ error: 'Could not add album to stack' })
     }
 })
+
+// app.patch('/api/v1/stacks/:userId', checkJwt, async (req, res) => {
+//     try {
+//         const { userId } = req.params
+//         const { albumId } = req.body
+//         if(!userId || !albumId) {
+//             res.status(400).json('User ID or Album ID not found.') 
+//         }
+//         const newAlbum = await database('user_albums').where('userId', '=', userId).select('*')
+//             .update({
+//                 albumId: database.raw('array_append(albumId, ?::text)', [JSON.stringify(albumId)])
+//             })
+//           res.status(201).json({ message:'Album added to stack!', id: newAlbum })
+//     }
+//     catch(err) {
+//         console.error('Error updating stack:', err)
+//         res.status(500).json({error: 'Could not add album due to internal error.'})
+//     }
+// })
 app.patch('/api/v1/stacks/delete', async (req, res) => {
     try {
         const { email, albumToDelete } = req.body;
