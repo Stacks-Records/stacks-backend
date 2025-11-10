@@ -9,6 +9,7 @@ module.exports = {
       user: 'postgres',
       password: 'Le()Mark812!',
       database: 'postgres',
+      port: '5433',
       charset: 'utf8'
     },
     migrations: {
