@@ -26,6 +26,14 @@ const checkJwt = auth({
     issuerBaseURL: process.env.AUTH0_ISSUER_BASE_URL,
 });
 
+const checkUserPermissions = (userRole, permission) => {
+    const ROLE_PERMISSIONS = {
+        'admin' : ['create_album', 'delete_album', 'update_album', 'view_album', 'manage_users'],
+        'moderator' : ['create_album', 'delete_album', 'update_album', 'view_album'],
+        'user' : ['view_album', 'create_album', 'update_album']
+    }
+}
+
 app.use(express.json())
 // app.use(checkJwt);
 
