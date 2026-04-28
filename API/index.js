@@ -28,11 +28,42 @@ const checkJwt = auth({
 
 const checkUserPermissions = (userRole, permission) => {
     const ROLE_PERMISSIONS = {
-        'admin' : ['create_album', 'delete_album', 'update_album', 'view_album', 'manage_users'],
-        'moderator' : ['create_album', 'delete_album', 'update_album', 'view_album'],
-        'user' : ['view_album', 'create_album', 'update_album']
+        'admin': ['create_album', 'delete_album', 'update_album', 'view_album', 'manage_users'],
+        'moderator': ['create_album', 'delete_album', 'update_album', 'view_album'],
+        'user': ['view_album', 'create_album', 'update_album']
     }
 }
+
+const requirePermission = (permission) => {
+    return async (req, res, next) => {
+        try {
+            const userId = req.auth?.sub;
+            if (!userId) {
+                return res.status(401).json({ error: 'User id not found.' })
+            }
+
+            const user = await database('users')
+                .where('email', req.auth?.payload?.email)
+                .first();
+
+            if (!user) {
+                return res.status(404).json({ error: 'User not found.' });
+            }
+
+            const hasPermission = checkUserPermissions(user.role, permission);
+            if (!hasPermission) {
+                return res.status(403).json({ error: 'Insufficient permissions.' })
+            }
+
+            req.user = user;
+            next();
+        } catch (error) {
+            console.error('Error checking permissions:', error);
+            res.status(500).json({ error: 'Authorization check failed.' })
+        }
+    };
+};
+
 
 app.use(express.json())
 // app.use(checkJwt);
