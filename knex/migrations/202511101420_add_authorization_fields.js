@@ -4,7 +4,7 @@ exports.up = function (knex) {
         knex.schema.table('users', function (table) {
             table.string('role').defaultTo('user');
             table.timestamp('created_at').defaultTo(knex.fn.now());
-            table.timestamp('updated_at').defaultTo()
+            table.timestamp('updated_at').defaultTo(knex.fn.now());
         }),
 
         knex.schema.table('albums', function (table) {
