@@ -7,6 +7,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
+const { hasPermission, canPerformAction, PERMISSIONS } = require('./permissions');
 
 database.on('query', queryData => {
     console.log('SQL:', queryData.sql);
@@ -26,22 +27,12 @@ const checkJwt = auth({
     issuerBaseURL: process.env.AUTH0_ISSUER_BASE_URL,
 });
 
-const checkUserPermissions = (userRole, permission) => {
-    const ROLE_PERMISSIONS = {
-        'admin': ['create_album', 'delete_album', 'update_album', 'view_album', 'manage_users'],
-        'moderator': ['create_album', 'delete_album', 'update_album', 'view_album'],
-        'user': ['view_album', 'create_album', 'update_album']
-    }
-
-    return ROLE_PERMISSIONS[userRole]?.includes(permission) ?? false;
-}
-
 const requirePermission = (permission) => {
     return async (req, res, next) => {
         try {
             const userId = req.auth?.sub;
             if (!userId) {
-                return res.status(401).json({ error: 'User id not found.' })
+                return res.status(401).json({ error: 'User id not found.' });
             }
 
             const user = await database('users')
@@ -52,16 +43,15 @@ const requirePermission = (permission) => {
                 return res.status(404).json({ error: 'User not found.' });
             }
 
-            const hasPermission = checkUserPermissions(user.role, permission);
-            if (!hasPermission) {
-                return res.status(403).json({ error: 'Insufficient permissions.' })
+            if (!hasPermission(user.role, permission)) {
+                return res.status(403).json({ error: 'Insufficient permissions.' });
             }
 
             req.user = user;
             next();
         } catch (error) {
             console.error('Error checking permissions:', error);
-            res.status(500).json({ error: 'Authorization check failed.' })
+            res.status(500).json({ error: 'Authorization check failed.' });
         }
     };
 };
@@ -107,13 +97,15 @@ app.get('/albums/:id', async (req, res) => {
     }
 });
 
-app.post('/add-stack', async (req, res) => {
+app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, res) => {
     const newAlbum = req.body
     if (!newAlbum || !Object.keys(newAlbum).length) {
         return res.status(400).send({ message: 'Invalid album data.' })
     }
     try {
-        const postedAlbum = await database('albums').insert(newAlbum).returning('*')
+        const postedAlbum = await database('albums')
+            .insert({ ...newAlbum, created_by: req.auth.sub })
+            .returning('*')
         res.status(201).json(postedAlbum[0])
     } catch (error) {
         console.error('Error posting your record :(', error)
@@ -121,20 +113,37 @@ app.post('/add-stack', async (req, res) => {
     }
 });
 
-app.delete('/albums/:id', async (req, res) => {
+app.delete('/albums/:id', checkJwt, async (req, res) => {
     const albumId = req.params.id;
     try {
-        const deletedRows = await database('albums').where('id', '=', albumId).del()
+        const album = await database('albums').where('id', albumId).first();
+        if (!album) {
+            return res.status(404).json({ error: `Album with id ${albumId} not found.` });
+        }
+
+        const user = await database('users')
+            .where('email', req.auth?.payload?.email)
+            .first();
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        const allowed = canPerformAction(user.role, PERMISSIONS.DELETE_ALBUM, album.created_by, req.auth.sub);
+        if (!allowed) {
+            return res.status(403).json({ error: 'Insufficient permissions.' });
+        }
+
+        const deletedRows = await database('albums').where('id', albumId).del();
         if (deletedRows) {
-            res.status(204).send()
+            res.status(204).send();
         } else {
-            res.status(404).json({ error: `Album with id ${albumId} not found.` })
+            res.status(404).json({ error: `Album with id ${albumId} not found.` });
         }
     } catch (error) {
-        res.status(500).json({ error: error.message })
+        res.status(500).json({ error: error.message });
     }
 })
-app.get('/api/v1/users', async (req, res) => {
+app.get('/api/v1/users', checkJwt, requirePermission('manage_users'), async (req, res) => {
     try {
         const users = await database('users').select('*')
         if (!users.length) {
@@ -150,7 +159,7 @@ app.get('/api/v1/users', async (req, res) => {
     }
 })
 
-app.post('/api/v1/users', checkJwt, requirePermission('create_album'), async (req, res) => {
+app.post('/api/v1/users', checkJwt, requirePermission('manage_users'), async (req, res) => {
     try {
         const { name, email } = req.body;
         const users = await database('users').select('*')
@@ -174,7 +183,7 @@ app.post('/api/v1/users', checkJwt, requirePermission('create_album'), async (re
 
 //post route for users table adding an album to mystacks
 
-app.patch('/api/v1/stacks', checkJwt, async (req, res) => {
+app.patch('/api/v1/stacks', checkJwt, requirePermission('create_album'), async (req, res) => {
     try {
         const { email, newAlbum } = req.body;
         const user = await database('users').select('*').where('email', '=', email)
@@ -217,7 +226,7 @@ app.patch('/api/v1/stacks', checkJwt, async (req, res) => {
 //         res.status(500).json({error: 'Could not add album due to internal error.'})
 //     }
 // })
-app.patch('/api/v1/stacks/delete', async (req, res) => {
+app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
     try {
         const { email, albumToDelete } = req.body;
         const user = await database('users').select('*').where('email', '=', email)
@@ -242,7 +251,7 @@ app.patch('/api/v1/stacks/delete', async (req, res) => {
     }
 })
 
-app.get('/api/v1/stacks', async (req, res) => {
+app.get('/api/v1/stacks', checkJwt, async (req, res) => {
     try {
         const email = req.headers.email;
         const albums = await database('users').where('email', email).select('mystack')
