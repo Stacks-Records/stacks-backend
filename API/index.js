@@ -32,6 +32,8 @@ const checkUserPermissions = (userRole, permission) => {
         'moderator': ['create_album', 'delete_album', 'update_album', 'view_album'],
         'user': ['view_album', 'create_album', 'update_album']
     }
+
+    return ROLE_PERMISSIONS[userRole]?.includes(permission) ?? false;
 }
 
 const requirePermission = (permission) => {
@@ -148,7 +150,7 @@ app.get('/api/v1/users', async (req, res) => {
     }
 })
 
-app.post('/api/v1/users', checkJwt, async (req, res) => {
+app.post('/api/v1/users', checkJwt, requirePermission('create_album'), async (req, res) => {
     try {
         const { name, email } = req.body;
         const users = await database('users').select('*')
