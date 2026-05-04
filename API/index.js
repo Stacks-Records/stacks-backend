@@ -159,7 +159,7 @@ app.get('/api/v1/users', checkJwt, requirePermission('manage_users'), async (req
     }
 })
 
-app.post('/api/v1/users', checkJwt, requirePermission('manage_users'), async (req, res) => {
+app.post('/api/v1/users', checkJwt, async (req, res) => {
     try {
         const { name, email } = req.body;
         const users = await database('users').select('*')
