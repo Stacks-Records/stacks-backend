@@ -36,7 +36,7 @@ const requirePermission = (permission) => {
             }
 
             const user = await database('users')
-                .where('email', req.auth?.payload?.email)
+                .where('email', req.auth?.email)
                 .first();
 
             if (!user) {
