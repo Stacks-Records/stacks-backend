@@ -30,13 +30,12 @@ const checkJwt = auth({
 const requirePermission = (permission) => {
     return async (req, res, next) => {
         try {
-            const userId = req.auth?.sub;
-            if (!userId) {
-                return res.status(401).json({ error: 'User id not found.' });
+            const email = req.auth?.payload?.email || req.auth?.email || req.headers.email;
+            if (!email) {
+                return res.status(401).json({ error: 'User not found.' });
             }
-
             const user = await database('users')
-                .where('email', req.auth?.email)
+                .where('email', email)
                 .first();
 
             if (!user) {
@@ -68,6 +67,18 @@ app.listen(port, () => {
     console.log(`Listening on port: ${port}`)
     console.log(`Current environment: ${process.env.NODE_ENV}`)
 })
+
+app.get('/api/v1/users/me', checkJwt, async (req, res) => {
+    try {
+        const email = req.headers.email;
+        if (!email) return res.status(400).json({ error: 'Email header required.' });
+        const user = await database('users').where('email', email).select('role').first();
+        if (!user) return res.status(404).json({ error: 'User not found.' });
+        res.status(200).json({ role: user.role || USER_ROLES.USER });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
 
 app.get('/albums', async (request, res) => {
 
@@ -113,6 +124,37 @@ app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, 
     }
 });
 
+app.patch('/albums/:id', checkJwt, async (req, res) => {
+    const albumId = req.params.id;
+    const updates = req.body;
+    try {
+        const album = await database('albums').where('id', albumId).first();
+        if (!album) {
+            return res.status(404).json({ error: `Album with id ${albumId} not found.` });
+        }
+
+        const user = await database('users')
+            .where('email', req.auth?.payload?.email)
+            .first();
+        if (!user) {
+            return res.status(404).json({ error: 'User not found.' });
+        }
+
+        const allowed = canPerformAction(user.role, PERMISSIONS.EDIT_ALBUM, album.created_by, req.auth.sub);
+        if (!allowed) {
+            return res.status(403).json({ error: 'Insufficient permissions.' });
+        }
+
+        const updated = await database('albums')
+            .where('id', albumId)
+            .update({ ...updates, updated_at: new Date() })
+            .returning('*');
+        res.status(200).json(updated[0]);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.delete('/albums/:id', checkJwt, async (req, res) => {
     const albumId = req.params.id;
     try {
@@ -122,7 +164,7 @@ app.delete('/albums/:id', checkJwt, async (req, res) => {
         }
 
         const user = await database('users')
-            .where('email', req.auth?.email)
+            .where('email', req.auth?.payload?.email)
             .first();
         if (!user) {
             return res.status(404).json({ error: 'User not found.' });
@@ -143,41 +185,6 @@ app.delete('/albums/:id', checkJwt, async (req, res) => {
         res.status(500).json({ error: error.message });
     }
 })
-
-app.patch('/albums/:id', checkJwt, async (req, res) => {
-    const albumId = req.params.id;
-    const updates = req.body;
-    if (!updates || !Object.keys(updates).length) {
-        return res.status(400).json({ error: 'No update data provided.' });
-    }
-    try {
-        const album = await database('albums').where('id', albumId).first();
-        if (!album) {
-            return res.status(404).json({ error: `Album with id ${albumId} not found.` });
-        }
-
-        const user = await database('users')
-            .where('email', req.auth?.email)
-            .first();
-        if (!user) {
-            return res.status(404).json({ error: 'User not found.' });
-        }
-
-        const allowed = canPerformAction(user.role, PERMISSIONS.EDIT_ALBUM, album.created_by, req.auth.sub);
-        if (!allowed) {
-            return res.status(403).json({ error: 'Insufficient permissions.' });
-        }
-
-        const updatedAlbum = await database('albums')
-            .where('id', albumId)
-            .update({ ...updates, updated_at: database.fn.now() })
-            .returning('*');
-        res.status(200).json(updatedAlbum[0]);
-    } catch (error) {
-        res.status(500).json({ error: error.message });
-    }
-})
-
 app.get('/api/v1/users', checkJwt, requirePermission('manage_users'), async (req, res) => {
     try {
         const users = await database('users').select('*')
