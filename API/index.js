@@ -7,7 +7,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
-const { hasPermission, canPerformAction, PERMISSIONS } = require('./permissions');
+const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES } = require('./permissions');
 
 database.on('query', queryData => {
     console.log('SQL:', queryData.sql);
@@ -178,6 +178,27 @@ app.post('/api/v1/users', checkJwt, async (req, res) => {
     }
     catch (error) {
         res.status(500).json({ error: 'Could not add new user' })
+    }
+})
+
+app.patch('/api/v1/users/:id/role', checkJwt, requirePermission('manage_users'), async (req, res) => {
+    const { id } = req.params;
+    const { role } = req.body;
+    const validRoles = Object.values(USER_ROLES);
+    if (!role || !validRoles.includes(role)) {
+        return res.status(400).json({ error: `Role must be one of: ${validRoles.join(', ')}` });
+    }
+    try {
+        const updated = await database('users')
+            .where('id', id)
+            .update({ role })
+            .returning('*');
+        if (!updated.length) {
+            return res.status(404).json({ error: `User with id ${id} not found.` });
+        }
+        res.status(200).json(updated[0]);
+    } catch (error) {
+        res.status(500).json({ error: 'Could not update user role.' });
     }
 })
 
