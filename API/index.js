@@ -8,6 +8,8 @@ const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'develop
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
 const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES } = require('./permissions');
+const { albumSchema } = require('./validation');
+const { randomUUID } = require('node:crypto');
 
 database.on('query', queryData => {
     console.log('SQL:', queryData.sql);
@@ -123,13 +125,16 @@ app.get('/api/v1/genres', async (req, res) => {
 });
 
 app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, res) => {
-    const newAlbum = req.body
-    if (!newAlbum || !Object.keys(newAlbum).length) {
-        return res.status(400).send({ message: 'Invalid album data.' })
+    const result = albumSchema.safeParse(req.body)
+    if (!result.success) {
+        const message = result.error.issues
+            .map(i => `${i.path.join('.')}: ${i.message}`)
+            .join('; ')
+        return res.status(400).json({ error: message })
     }
     try {
         const postedAlbum = await database('albums')
-            .insert({ ...newAlbum, created_by: req.auth.sub })
+            .insert({ ...result.data, id: randomUUID(), created_by: req.auth.sub })
             .returning('*')
         res.status(201).json(postedAlbum[0])
     } catch (error) {
