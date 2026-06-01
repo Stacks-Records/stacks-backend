@@ -65,10 +65,12 @@ app.locals.title = 'Stacks'
 
 app.get("/", (req, res) => res.send("Express on Vercel"));
 app.set('port', process.env.PORT);
-app.listen(port, () => {
-    console.log(`Listening on port: ${port}`)
-    console.log(`Current environment: ${process.env.NODE_ENV}`)
-})
+if (process.env.NODE_ENV !== 'production') {
+    app.listen(port, () => {
+        console.log(`Listening on port: ${port}`)
+        console.log(`Current environment: ${process.env.NODE_ENV}`)
+    })
+}
 
 app.get('/api/v1/users/me', checkJwt, async (req, res) => {
     try {

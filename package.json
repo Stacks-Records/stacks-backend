@@ -2,11 +2,11 @@
   "name": "stacks-api",
   "version": "1.0.0",
   "description": "",
-  "main": "index.js",
+  "main": "API/index.js",
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "knex migrate:latest && knex seed:run",
-    "start": "node index.js",
+    "start": "node API/index.js",
     "build": "knex migrate:rollback && knex migrate:latest && knex seed:run"
   },
   "keywords": [],
