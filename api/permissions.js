@@ -35,6 +35,25 @@ function hasPermission(userRole, permission) {
     return ROLE_PERMISSIONS[userRole]?.includes(permission) ?? false;
 }
 
+// Emails configured as permanent admins, e.g. ADMIN_EMAILS="me@x.com,you@y.com".
+// Parsed fresh each call so env changes take effect without a code change.
+function getAdminEmails() {
+    return (process.env.ADMIN_EMAILS || '')
+        .split(',')
+        .map(email => email.trim().toLowerCase())
+        .filter(Boolean);
+}
+
+// Resolve a user's effective role. Any email in ADMIN_EMAILS is always treated
+// as admin regardless of the stored DB value — this bootstraps the first admin
+// and keeps admin status across DB resets/reseeds.
+function resolveRole(email, dbRole) {
+    if (email && getAdminEmails().includes(email.toLowerCase())) {
+        return USER_ROLES.ADMIN;
+    }
+    return dbRole || USER_ROLES.USER;
+}
+
 // ADMIN/MODERATOR bypass ownership for edit/delete; USER must own the resource.
 function canPerformAction(userRole, permission, resourceOwnerId, userId) {
     if (!hasPermission(userRole, permission)) return false;
@@ -45,4 +64,4 @@ function canPerformAction(userRole, permission, resourceOwnerId, userId) {
     return true;
 }
 
-module.exports = { USER_ROLES, PERMISSIONS, ROLE_PERMISSIONS, hasPermission, canPerformAction };
+module.exports = { USER_ROLES, PERMISSIONS, ROLE_PERMISSIONS, hasPermission, canPerformAction, resolveRole };
