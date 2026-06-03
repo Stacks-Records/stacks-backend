@@ -84,10 +84,41 @@ app.get('/api/v1/users/me', checkJwt, async (req, res) => {
     }
 });
 
+// Columns clients are allowed to sort/filter by. Whitelisting prevents
+// arbitrary req.query values from reaching .orderBy()/.where() as identifiers.
+// releaseDate is intentionally omitted from SORTABLE: it's stored as a string
+// (e.g. "September 12th, 1975"), so it would sort alphabetically, not by date.
+const ALBUM_SORTABLE = ['albumName', 'artist', 'genre', 'albumsSold', 'created_at'];
+const ALBUM_FILTERABLE = ['genre', 'artist', 'label', 'isBandTogether'];
+
 app.get('/albums', async (request, res) => {
 
     try {
-        const albums = await database('albums').select()
+        const { sortBy, order, search, ...filters } = request.query;
+        let query = database('albums');
+
+        // Exact-match filters, e.g. ?genre=Rock&artist=Pink Floyd
+        for (const [key, value] of Object.entries(filters)) {
+            if (ALBUM_FILTERABLE.includes(key)) {
+                query = query.where(key, value);
+            }
+        }
+
+        // Case-insensitive free-text search across name + artist, e.g. ?search=floyd
+        if (search) {
+            query = query.where(builder =>
+                builder.whereILike('albumName', `%${search}%`)
+                    .orWhereILike('artist', `%${search}%`)
+            );
+        }
+
+        // Sorting, e.g. ?sortBy=albumsSold&order=desc
+        if (sortBy && ALBUM_SORTABLE.includes(sortBy)) {
+            const dir = order === 'desc' ? 'desc' : 'asc';
+            query = query.orderBy(sortBy, dir);
+        }
+
+        const albums = await query.select()
         res.status(200).json(albums)
     } catch (error) {
         console.error('Database error:', error)
@@ -122,6 +153,38 @@ app.get('/api/v1/genres', async (req, res) => {
         res.status(200).json(genres);
     } catch (error) {
         console.error('Error fetching genres:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Albums grouped by genre, capped to N per genre via a window function so the
+// whole table is never loaded. Powers the per-genre carousels on the landing page.
+// Distinct from /albums?genre=X (one genre per call): this returns every genre's
+// top-N in a single request, with the cap enforced in SQL.
+app.get('/api/v1/albums/by-genre', async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    try {
+        const ranked = await database
+            .with('ranked', database.raw(
+                `SELECT *, ROW_NUMBER() OVER (PARTITION BY genre ORDER BY "albumName" ASC) AS rn
+                 FROM albums WHERE genre IS NOT NULL`))
+            .select('*').from('ranked').where('rn', '<=', limit)
+            .orderBy(['genre', 'albumName']);
+
+        const byGenre = new Map();
+        const grouped = [];
+        for (const row of ranked) {
+            if (!byGenre.has(row.genre)) {
+                const entry = { genre: row.genre, albums: [] };
+                byGenre.set(row.genre, entry);
+                grouped.push(entry);
+            }
+            delete row.rn;
+            byGenre.get(row.genre).albums.push(row);
+        }
+        res.status(200).json(grouped);
+    } catch (error) {
+        console.error('Error fetching albums by genre:', error);
         res.status(500).json({ error: error.message });
     }
 });
