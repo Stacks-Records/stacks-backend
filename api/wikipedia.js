@@ -27,6 +27,32 @@ async function wikiGet(params) {
     return res.json();
 }
 
+// Pulls the infobox cover filename out of the wikitext, e.g.
+// "| cover = FMacRumours.PNG" -> "FMacRumours.PNG". Album covers are non-free, so
+// PageImages omits them — the infobox is the reliable source.
+function extractCoverFilename(wikitext) {
+    const m = wikitext.match(/\|\s*[Cc]over\s*=\s*([^\n|]+)/);
+    if (!m) return null;
+    let v = m[1].trim()
+        .replace(/^\[\[\s*(?:File|Image):/i, '')
+        .replace(/\]\]\s*$/, '')
+        .split('|')[0]
+        .replace(/^(?:File|Image):/i, '')
+        .trim();
+    return v || null;
+}
+
+// Resolves a Wikipedia file name to its actual upload URL via imageinfo.
+async function resolveImageURL(filename) {
+    const data = await wikiGet({
+        action: 'query',
+        titles: `File:${filename}`,
+        prop: 'imageinfo',
+        iiprop: 'url',
+    });
+    return data?.query?.pages?.[0]?.imageinfo?.[0]?.url ?? null;
+}
+
 // Finds the best-matching Wikipedia page title for an album. We bias the query
 // toward album articles by appending "album" and the artist name.
 async function searchPageTitle(albumName, artist) {
@@ -57,13 +83,18 @@ async function fetchAlbumArticle({ albumName, artist }) {
     const page = pageData?.query?.pages?.[0];
     if (!page || page.missing) return null;
 
-    const wikitext = (page.revisions?.[0]?.slots?.main?.content ?? '').slice(0, MAX_WIKITEXT_CHARS);
-    if (!wikitext) return null;
+    const fullWikitext = page.revisions?.[0]?.slots?.main?.content ?? '';
+    if (!fullWikitext) return null;
+
+    // Prefer the infobox cover (album covers are non-free, so PageImages omits them);
+    // fall back to the PageImages lead image if the article has no infobox cover.
+    const coverFilename = extractCoverFilename(fullWikitext);
+    const imgURL = (coverFilename && await resolveImageURL(coverFilename)) || page.original?.source || null;
 
     return {
         matchedTitle: title,
-        wikitext,
-        imgURL: page.original?.source ?? null,
+        wikitext: fullWikitext.slice(0, MAX_WIKITEXT_CHARS),
+        imgURL,
         sourceUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`,
     };
 }
