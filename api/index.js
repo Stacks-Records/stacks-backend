@@ -7,7 +7,7 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
-const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES } = require('./permissions');
+const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('./permissions');
 const { albumSchema } = require('./validation');
 const { randomUUID } = require('node:crypto');
 
@@ -29,10 +29,15 @@ const checkJwt = auth({
     issuerBaseURL: process.env.AUTH0_ISSUER_BASE_URL,
 });
 
+// Identity comes from the verified JWT, never a client-supplied header — a header
+// can be spoofed to any value, which would let any valid token claim an admin
+// email. The header is only a last-resort fallback for tokens lacking the claim.
+const getAuthEmail = (req) => req.auth?.payload?.email || req.auth?.email || req.headers.email;
+
 const requirePermission = (permission) => {
     return async (req, res, next) => {
         try {
-            const email = req.auth?.payload?.email || req.auth?.email || req.headers.email;
+            const email = getAuthEmail(req);
             if (!email) {
                 return res.status(401).json({ error: 'User not found.' });
             }
@@ -44,11 +49,12 @@ const requirePermission = (permission) => {
                 return res.status(404).json({ error: 'User not found.' });
             }
 
-            if (!hasPermission(user.role, permission)) {
+            const role = resolveRole(email, user.role);
+            if (!hasPermission(role, permission)) {
                 return res.status(403).json({ error: 'Insufficient permissions.' });
             }
 
-            req.user = user;
+            req.user = { ...user, role };
             next();
         } catch (error) {
             console.error('Error checking permissions:', error);
@@ -74,11 +80,11 @@ if (process.env.NODE_ENV !== 'production') {
 
 app.get('/api/v1/users/me', checkJwt, async (req, res) => {
     try {
-        const email = req.headers.email;
-        if (!email) return res.status(400).json({ error: 'Email header required.' });
+        const email = getAuthEmail(req);
+        if (!email) return res.status(400).json({ error: 'Authenticated email required.' });
         const user = await database('users').where('email', email).select('role').first();
         if (!user) return res.status(404).json({ error: 'User not found.' });
-        res.status(200).json({ role: user.role || USER_ROLES.USER });
+        res.status(200).json({ role: resolveRole(email, user.role) });
     } catch (error) {
         res.status(500).json({ error: error.message });
     }
@@ -400,7 +406,7 @@ app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
 
 app.get('/api/v1/stacks', checkJwt, async (req, res) => {
     try {
-        const email = req.headers.email;
+        const email = getAuthEmail(req);
         const albums = await database('users').where('email', email).select('mystack')
         if (!albums.length) {
             res.status(201).json('No stack to display')
