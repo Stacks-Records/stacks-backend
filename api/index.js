@@ -157,6 +157,38 @@ app.get('/api/v1/genres', async (req, res) => {
     }
 });
 
+// Albums grouped by genre, capped to N per genre via a window function so the
+// whole table is never loaded. Powers the per-genre carousels on the landing page.
+// Distinct from /albums?genre=X (one genre per call): this returns every genre's
+// top-N in a single request, with the cap enforced in SQL.
+app.get('/api/v1/albums/by-genre', async (req, res) => {
+    const limit = Math.min(parseInt(req.query.limit) || 20, 50);
+    try {
+        const ranked = await database
+            .with('ranked', database.raw(
+                `SELECT *, ROW_NUMBER() OVER (PARTITION BY genre ORDER BY "albumName" ASC) AS rn
+                 FROM albums WHERE genre IS NOT NULL`))
+            .select('*').from('ranked').where('rn', '<=', limit)
+            .orderBy(['genre', 'albumName']);
+
+        const byGenre = new Map();
+        const grouped = [];
+        for (const row of ranked) {
+            if (!byGenre.has(row.genre)) {
+                const entry = { genre: row.genre, albums: [] };
+                byGenre.set(row.genre, entry);
+                grouped.push(entry);
+            }
+            delete row.rn;
+            byGenre.get(row.genre).albums.push(row);
+        }
+        res.status(200).json(grouped);
+    } catch (error) {
+        console.error('Error fetching albums by genre:', error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, res) => {
     const result = albumSchema.safeParse(req.body)
     if (!result.success) {
