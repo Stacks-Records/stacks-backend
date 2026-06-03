@@ -7,12 +7,15 @@
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "knex migrate:latest && knex seed:run",
     "start": "node api/index.js",
-    "build": "knex migrate:rollback && knex migrate:latest && knex seed:run"
+    "build": "echo \"No build step\"",
+    "migrate": "knex migrate:latest",
+    "seed": "knex seed:run"
   },
   "keywords": [],
   "author": "",
   "license": "ISC",
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.100.1",
     "@vercel/postgres": "^0.10.0",
     "cors": "^2.8.5",
     "dotenv": "^16.4.5",
