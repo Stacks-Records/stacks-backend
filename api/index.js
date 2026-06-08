@@ -10,6 +10,9 @@ const { auth } = require('express-oauth2-jwt-bearer');
 const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('./permissions');
 const { albumSchema } = require('./validation');
 const { randomUUID } = require('node:crypto');
+const { loadAlbumList } = require('./albumList');
+const { fetchAlbumArticle } = require('./wikipedia');
+const { enrichAlbum } = require('./enrich');
 
 database.on('query', queryData => {
     console.log('SQL:', queryData.sql);
@@ -211,6 +214,66 @@ app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, 
     } catch (error) {
         console.error('Error posting your record :(', error)
         res.status(500).json({ error: error.message })
+    }
+});
+
+// Daily Vercel cron target. Walks the Rolling Stone Top 500 in rank order, adds the
+// lowest-ranked album not yet in the library — sourcing the editorial fields from
+// Wikipedia via Claude. Credited to the kylemboomer@gmail.com user (CRON_AUTHOR_SUB).
+// Up to MAX_ATTEMPTS candidates are tried per run so one bad article can't stall progress.
+const CRON_IMPORT_MAX_ATTEMPTS = 3;
+
+app.get('/api/cron/import-albums', async (req, res) => {
+    // Vercel sends `Authorization: Bearer ${CRON_SECRET}` when CRON_SECRET is set.
+    // This endpoint is publicly reachable (catch-all rewrite), so the check is required.
+    const expected = `Bearer ${process.env.CRON_SECRET}`;
+    if (!process.env.CRON_SECRET || req.headers.authorization !== expected) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    if (!process.env.CRON_AUTHOR_SUB) {
+        return res.status(500).json({ error: 'CRON_AUTHOR_SUB is not configured.' });
+    }
+
+    try {
+        const list = loadAlbumList();
+
+        // Build a set of existing album names (lowercased) to skip in one query.
+        const existingRows = await database('albums').select('albumName');
+        const existing = new Set(existingRows.map(r => r.albumName.toLowerCase()));
+
+        const remaining = list.filter(a => !existing.has(a.albumName.toLowerCase()));
+        if (remaining.length === 0) {
+            return res.status(200).json({ done: true, message: 'All albums in the list are already imported.' });
+        }
+
+        const skipped = [];
+        for (const candidate of remaining.slice(0, CRON_IMPORT_MAX_ATTEMPTS)) {
+            const article = await fetchAlbumArticle(candidate);
+            if (!article) {
+                skipped.push({ rank: candidate.rank, albumName: candidate.albumName, reason: 'no Wikipedia article found' });
+                continue;
+            }
+
+            const enriched = await enrichAlbum(candidate, article);
+            const result = albumSchema.safeParse(enriched);
+            if (!result.success) {
+                const reason = result.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
+                skipped.push({ rank: candidate.rank, albumName: candidate.albumName, reason });
+                continue;
+            }
+
+            const [inserted] = await database('albums')
+                .insert({ ...result.data, id: randomUUID(), created_by: process.env.CRON_AUTHOR_SUB })
+                .returning('*');
+            return res.status(201).json({ added: inserted.albumName, rank: candidate.rank, skipped });
+        }
+
+        // Every attempted candidate failed — surface why so it can be investigated.
+        console.error('cron import: no candidate succeeded this run', skipped);
+        return res.status(200).json({ added: null, skipped });
+    } catch (error) {
+        console.error('cron import failed:', error);
+        return res.status(500).json({ error: error.message });
     }
 });
 
