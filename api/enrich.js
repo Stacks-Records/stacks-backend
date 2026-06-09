@@ -2,7 +2,8 @@
 //
 // The CSV already gives us albumName, artist, and genre (authoritative). The Claude
 // API reads the Wikipedia wikitext and fills only the remaining factual fields. The
-// cover image comes from Wikipedia; the YouTube link is a constructed search URL.
+// cover image comes from Wikipedia; the YouTube link is resolved to a real /watch URL
+// via the YouTube Data API (falling back to a search URL when no key is configured).
 
 const Anthropic = require('@anthropic-ai/sdk');
 
@@ -38,7 +39,7 @@ Return ONLY these fields, read from the article (especially the {{Infobox album}
 - label: the record label that released it.
 - bandMembers: the performing artist's members/personnel. For a solo artist, use a one-element array with the artist's name.
 - isBandTogether: true if the artist/band is still active today, false if disbanded, on indefinite hiatus, or the primary artist is deceased.
-- rollingStoneReview: the album's Rolling Stone rating expressed as that many asterisks, one of "*", "**", "***", "****", "*****". Look in the "Professional ratings" / {{Album ratings}} box for the Rolling Stone entry (e.g. "4/5 stars" -> "****"). If the article has NO Rolling Stone rating, return "*".
+- rollingStoneReview: the album's Rolling Stone rating expressed as that many asterisks, one of "*", "**", "***", "****", "*****". Look in the "Professional ratings" / {{Album ratings}} box for the Rolling Stone entry (e.g. "4/5 stars" -> "****"). If the article has NO Rolling Stone rating, return "*****" (these are Rolling Stone Top 500 albums).
 - albumsSold: total copies sold worldwide as an integer if the article states a sales figure or certification-derived number; otherwise 0.
 
 Do not include albumName, artist, or genre — those are provided separately and are authoritative.`;
@@ -46,6 +47,32 @@ Do not include albumName, artist, or genre — those are provided separately and
 function buildYouTubeSearchURL(albumName, artist) {
     const q = encodeURIComponent(`${artist} ${albumName} full album`);
     return `https://www.youtube.com/results?search_query=${q}`;
+}
+
+// Resolves a real /watch?v= URL via the YouTube Data API v3 so the link embeds in
+// the RecordPage iframe (a /results search URL does not). Falls back to the search
+// URL when the key is missing or the call fails, so import never breaks on YouTube.
+// Quota: search.list costs 100 units; the daily cron imports <=3 albums, well under
+// the 10k/day free quota.
+async function resolveYouTubeURL(albumName, artist) {
+    const key = process.env.YOUTUBE_API_KEY;
+    if (!key) return buildYouTubeSearchURL(albumName, artist);
+    try {
+        const params = new URLSearchParams({
+            key,
+            part: 'snippet',
+            type: 'video',
+            maxResults: '1',
+            q: `${artist} ${albumName} full album`,
+        });
+        const res = await fetch(`https://www.googleapis.com/youtube/v3/search?${params}`);
+        if (!res.ok) return buildYouTubeSearchURL(albumName, artist);
+        const data = await res.json();
+        const id = data?.items?.[0]?.id?.videoId;
+        return id ? `https://www.youtube.com/watch?v=${id}` : buildYouTubeSearchURL(albumName, artist);
+    } catch {
+        return buildYouTubeSearchURL(albumName, artist);
+    }
 }
 
 // candidate: { albumName, artist, genre } from the CSV
@@ -69,8 +96,9 @@ async function enrichAlbum(candidate, article) {
     const text = response.content.find((b) => b.type === 'text')?.text ?? '{}';
     const derived = JSON.parse(text);
 
-    // Enforce the star format defensively (default to "*" if the model strays).
-    if (!/^\*{1,5}$/.test(derived.rollingStoneReview)) derived.rollingStoneReview = '*';
+    // Enforce the star format defensively. These are Rolling Stone Top 500 albums,
+    // so default to a perfect rating if the model strays from the star format.
+    if (!/^\*{1,5}$/.test(derived.rollingStoneReview)) derived.rollingStoneReview = '*****';
 
     return {
         // Authoritative fields from the CSV
@@ -86,7 +114,7 @@ async function enrichAlbum(candidate, article) {
         albumsSold: Math.max(0, Math.trunc(derived.albumsSold ?? 0)),
         // Constructed / sourced
         imgURL: article.imgURL,
-        youTubeAlbumURL: buildYouTubeSearchURL(candidate.albumName, candidate.artist),
+        youTubeAlbumURL: await resolveYouTubeURL(candidate.albumName, candidate.artist),
     };
 }
 
