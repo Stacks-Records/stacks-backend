@@ -53,25 +53,89 @@ async function resolveImageURL(filename) {
     return data?.query?.pages?.[0]?.imageinfo?.[0]?.url ?? null;
 }
 
-// Finds the best-matching Wikipedia page title for an album. We bias the query
-// toward album articles by appending "album" and the artist name.
-async function searchPageTitle(albumName, artist) {
+// Finds candidate Wikipedia page titles for an album. We bias the query toward
+// album articles by appending "album" and the artist name, but return several
+// candidates so fetchAlbumArticle can skip non-album hits (e.g. a same-named song).
+async function searchPageTitles(albumName, artist) {
     const data = await wikiGet({
         action: 'query',
         list: 'search',
         srsearch: `${albumName} ${artist} album`,
-        srlimit: '1',
+        srlimit: '8',
         srnamespace: '0',
     });
-    return data?.query?.search?.[0]?.title ?? null;
+    return (data?.query?.search ?? []).map((r) => r.title);
 }
 
-// Fetches an album's article. Returns wikitext + cover image, or null if no page
-// is found so the caller can move on to the next album in the list.
-async function fetchAlbumArticle({ albumName, artist }) {
-    const title = await searchPageTitle(albumName, artist);
-    if (!title) return null;
+// Wikipedia's canonical disambiguation patterns for an album. Search relevance often
+// buries the original album under same-named songs/films/reissues (e.g. the plain
+// "Sgt. Pepper's Lonely Hearts Club Band" page is not even in the top search hits),
+// so we probe these exact titles directly and let scoring pick the best.
+function directTitleGuesses(albumName, artist) {
+    return [
+        albumName,
+        `${albumName} (album)`,
+        `${albumName} (${artist} album)`,
+    ];
+}
 
+// Titles that are clearly not the album article — a same-named song/single/film/EP
+// would otherwise yield the wrong cover and ratings (e.g. the "Sgt. Pepper's ...
+// (song)" page, whose cover is the single sleeve, not the album art).
+const NON_ALBUM_TITLE = /\((song|single|film|EP)\)$/i;
+
+// True when the wikitext is an album article (has an {{Infobox album}} template).
+const isAlbumArticle = (wikitext) => /\{\{\s*Infobox album/i.test(wikitext);
+
+// Loose name normalization for comparing artist names across infobox/CSV: drop
+// wikilinks/punctuation and a leading "The" so "[[The Beatles]]" == "Beatles".
+function normalizeName(s) {
+    return (s || '')
+        .toLowerCase()
+        .replace(/\[\[|\]\]/g, '')
+        .replace(/^the\s+/, '')
+        .replace(/[^a-z0-9]+/g, ' ')
+        .trim();
+}
+
+// Pulls the {{Infobox album}} artist so we can pick the page by the right artist —
+// e.g. distinguish the Beatles' "Sgt. Pepper's..." from the 1978 film soundtrack of
+// the same name (an album article too, but by various artists).
+function extractInfoboxArtist(wikitext) {
+    const m = wikitext.match(/\|\s*[Aa]rtist\s*=\s*([^\n|]+)/);
+    return m ? normalizeName(m[1].split('|').pop()) : '';
+}
+
+// True when the article's infobox artist matches the CSV artist (either contains
+// the other, after normalization), tolerating "feat."/extra words on either side.
+function artistMatches(wikitext, artist) {
+    const want = normalizeName(artist);
+    const have = extractInfoboxArtist(wikitext);
+    if (!want || !have) return false;
+    return have.includes(want) || want.includes(have);
+}
+
+// Reissue/edition markers — used to deprioritize "...: 50th Anniversary Edition",
+// deluxe/remaster pages in favor of the original album of the same name.
+const REISSUE_TITLE = /anniversary|deluxe|edition|remaster|reissue|expanded|super/i;
+
+// Scores how well a candidate page matches the album we're importing. Higher is
+// better. Artist match dominates; an exact title match beats a prefix match; and
+// reissue/edition pages are penalized so the original album wins ties.
+function scoreCandidate(title, wikitext, albumName, artist) {
+    let score = 0;
+    if (artistMatches(wikitext, artist)) score += 100;
+    const t = normalizeName(title.replace(/\s*\([^)]*\)\s*$/, '')); // drop trailing "(album)" etc.
+    const a = normalizeName(albumName);
+    if (t === a) score += 30;
+    else if (t.startsWith(a)) score += 10;
+    else if (t.includes(a)) score += 5;
+    if (REISSUE_TITLE.test(title)) score -= 15;
+    return score;
+}
+
+// Fetches one page's wikitext + lead image. Returns null if missing/empty.
+async function fetchPageData(title) {
     const pageData = await wikiGet({
         action: 'query',
         titles: title,
@@ -82,21 +146,45 @@ async function fetchAlbumArticle({ albumName, artist }) {
     });
     const page = pageData?.query?.pages?.[0];
     if (!page || page.missing) return null;
+    const wikitext = page.revisions?.[0]?.slots?.main?.content ?? '';
+    if (!wikitext) return null;
+    return { wikitext, leadImage: page.original?.source ?? null };
+}
 
-    const fullWikitext = page.revisions?.[0]?.slots?.main?.content ?? '';
-    if (!fullWikitext) return null;
-
+// Builds the article result (resolves the cover image) for a chosen page.
+async function buildArticle(title, page) {
     // Prefer the infobox cover (album covers are non-free, so PageImages omits them);
     // fall back to the PageImages lead image if the article has no infobox cover.
-    const coverFilename = extractCoverFilename(fullWikitext);
-    const imgURL = (coverFilename && await resolveImageURL(coverFilename)) || page.original?.source || null;
-
+    const coverFilename = extractCoverFilename(page.wikitext);
+    const imgURL = (coverFilename && await resolveImageURL(coverFilename)) || page.leadImage || null;
     return {
         matchedTitle: title,
-        wikitext: fullWikitext.slice(0, MAX_WIKITEXT_CHARS),
+        wikitext: page.wikitext.slice(0, MAX_WIKITEXT_CHARS),
         imgURL,
         sourceUrl: `https://en.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`,
     };
+}
+
+// Fetches an album's article. Of the search candidates that are album articles
+// ({{Infobox album}}), picks the best-scoring one (see scoreCandidate): same artist,
+// exact title, original over reissue. This skips same-named songs/singles, same-named
+// albums by other artists (e.g. the 1978 "Sgt. Pepper's..." film soundtrack), and
+// anniversary/deluxe editions. Returns null if no album page is found.
+async function fetchAlbumArticle({ albumName, artist }) {
+    const searched = await searchPageTitles(albumName, artist);
+    // Probe canonical exact titles first, then search hits; dedupe and drop obvious
+    // song/single pages. The exact-title probes rescue albums the search buries.
+    const candidates = [...new Set([...directTitleGuesses(albumName, artist), ...searched])]
+        .filter((t) => !NON_ALBUM_TITLE.test(t));
+
+    let best = null; // { title, page, score }
+    for (const title of candidates) {
+        const page = await fetchPageData(title);
+        if (!page || !isAlbumArticle(page.wikitext)) continue;
+        const score = scoreCandidate(title, page.wikitext, albumName, artist);
+        if (!best || score > best.score) best = { title, page, score };
+    }
+    return best ? buildArticle(best.title, best.page) : null;
 }
 
 module.exports = { fetchAlbumArticle };
