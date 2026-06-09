@@ -85,8 +85,15 @@ app.get('/api/v1/users/me', checkJwt, async (req, res) => {
     try {
         const email = getAuthEmail(req);
         if (!email) return res.status(400).json({ error: 'Authenticated email required.' });
-        const user = await database('users').where('email', email).select('role').first();
-        if (!user) return res.status(404).json({ error: 'User not found.' });
+        // Auto-provision on first authenticated request: the user exists in Auth0
+        // but may not have a row here yet. Create one (role defaults to 'user');
+        // ADMIN_EMAILS still elevates via resolveRole below.
+        let user = await database('users').where('email', email).first();
+        if (!user) {
+            [user] = await database('users')
+                .insert({ email, username: email.split('@')[0], mystack: [] })
+                .returning('*');
+        }
         res.status(200).json({ role: resolveRole(email, user.role) });
     } catch (error) {
         res.status(500).json({ error: error.message });
@@ -286,14 +293,19 @@ app.patch('/albums/:id', checkJwt, async (req, res) => {
             return res.status(404).json({ error: `Album with id ${albumId} not found.` });
         }
 
+        const email = getAuthEmail(req);
         const user = await database('users')
-            .where('email', req.auth?.payload?.email)
+            .where('email', email)
             .first();
         if (!user) {
             return res.status(404).json({ error: 'User not found.' });
         }
 
-        const allowed = canPerformAction(user.role, PERMISSIONS.EDIT_ALBUM, album.created_by, req.auth.sub);
+        // Resolve the effective role so ADMIN_EMAILS elevation applies here too (the
+        // raw DB role is just the auto-created 'user' default). Identity for the
+        // ownership check is the JWT sub, which lives under req.auth.payload.sub.
+        const role = resolveRole(email, user.role);
+        const allowed = canPerformAction(role, PERMISSIONS.EDIT_ALBUM, album.created_by, req.auth?.payload?.sub);
         if (!allowed) {
             return res.status(403).json({ error: 'Insufficient permissions.' });
         }
@@ -316,14 +328,19 @@ app.delete('/albums/:id', checkJwt, async (req, res) => {
             return res.status(404).json({ error: `Album with id ${albumId} not found.` });
         }
 
+        const email = getAuthEmail(req);
         const user = await database('users')
-            .where('email', req.auth?.payload?.email)
+            .where('email', email)
             .first();
         if (!user) {
             return res.status(404).json({ error: 'User not found.' });
         }
 
-        const allowed = canPerformAction(user.role, PERMISSIONS.DELETE_ALBUM, album.created_by, req.auth.sub);
+        // Resolve the effective role so ADMIN_EMAILS elevation applies here too (the
+        // raw DB role is just the auto-created 'user' default). Identity for the
+        // ownership check is the JWT sub, which lives under req.auth.payload.sub.
+        const role = resolveRole(email, user.role);
+        const allowed = canPerformAction(role, PERMISSIONS.DELETE_ALBUM, album.created_by, req.auth?.payload?.sub);
         if (!allowed) {
             return res.status(403).json({ error: 'Insufficient permissions.' });
         }
