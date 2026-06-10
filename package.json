@@ -8,6 +8,7 @@
     "dev": "knex migrate:latest && knex seed:run",
     "start": "node api/index.js",
     "build": "echo \"No build step\"",
+    "vercel-build": "knex migrate:latest --env production",
     "migrate": "knex migrate:latest",
     "seed": "knex seed:run"
   },
