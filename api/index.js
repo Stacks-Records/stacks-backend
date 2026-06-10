@@ -13,6 +13,39 @@ const { randomUUID } = require('node:crypto');
 const { loadAlbumList } = require('./albumList');
 const { fetchAlbumArticle } = require('./wikipedia');
 const { enrichAlbum } = require('./enrich');
+const { parseGenres, canonicalizeName, genreSlug } = require('./genres');
+
+// Sets an album's genres from a list of already-discrete genre names and (re)writes
+// the album_genres links. This is the create-or-attach core: each name is normalized
+// and matched by slug to an existing genre, or inserted as a NEW user-contributed
+// genre (is_canonical defaults to false). Idempotent — it clears the album's existing
+// links and inserts the current set, so it's safe on both create and update.
+//
+// Callers supply discrete names: user submissions pass their genres[] array (one
+// genre per element); the cron passes parseGenres(rawString) to split the compound
+// Discogs CSV string first. Never run a compound string through here directly.
+const setAlbumGenres = async (albumId, names) => {
+    // Normalize + dedupe by slug so "Shoegaze"/"shoegaze" collapse to one genre.
+    const bySlug = new Map();
+    for (const raw of names || []) {
+        const slug = genreSlug(raw);
+        if (slug && !bySlug.has(slug)) bySlug.set(slug, canonicalizeName(raw));
+    }
+
+    await database('album_genres').where('album_id', albumId).del();
+    if (bySlug.size === 0) return;
+
+    const slugs = [...bySlug.keys()];
+    // Insert any genres we don't have yet (existing canonical rows are untouched, so
+    // they keep is_canonical = true), then read back ids for every slug we need.
+    await database('genres')
+        .insert(slugs.map(slug => ({ name: bySlug.get(slug), slug })))
+        .onConflict('slug').ignore();
+    const rows = await database('genres').whereIn('slug', slugs).select('id');
+    await database('album_genres')
+        .insert(rows.map(r => ({ album_id: albumId, genre_id: r.id })))
+        .onConflict(['album_id', 'genre_id']).ignore();
+};
 
 database.on('query', queryData => {
     console.log('SQL:', queryData.sql);
@@ -104,37 +137,52 @@ app.get('/api/v1/users/me', checkJwt, async (req, res) => {
 // arbitrary req.query values from reaching .orderBy()/.where() as identifiers.
 // releaseDate is intentionally omitted from SORTABLE: it's stored as a string
 // (e.g. "September 12th, 1975"), so it would sort alphabetically, not by date.
-const ALBUM_SORTABLE = ['albumName', 'artist', 'genre', 'albumsSold', 'created_at'];
-const ALBUM_FILTERABLE = ['genre', 'artist', 'label', 'isBandTogether'];
+// rollingStoneReview IS sortable: it's stored as asterisks ("*".."*****"), and
+// because each rating is a prefix of the next, lexicographic order matches star
+// count (asc = 1 star first, desc = 5 stars first).
+const ALBUM_SORTABLE = ['albumName', 'artist', 'albumsSold', 'created_at', 'rollingStoneReview'];
+// `genre` is handled separately via the album_genres join, not as a column filter.
+const ALBUM_FILTERABLE = ['artist', 'label', 'isBandTogether'];
 
 app.get('/albums', async (request, res) => {
 
     try {
-        const { sortBy, order, search, ...filters } = request.query;
+        const { sortBy, order, search, genre, ...filters } = request.query;
         let query = database('albums');
 
-        // Exact-match filters, e.g. ?genre=Rock&artist=Pink Floyd
+        // Genre now lives in the join table, so ?genre=Rock filters via album_genres
+        // against the canonical genre name. Columns are qualified because the join
+        // brings ambiguous names (genres.name etc.) into scope.
+        if (genre) {
+            query = query
+                .join('album_genres', 'albums.id', 'album_genres.album_id')
+                .join('genres', 'genres.id', 'album_genres.genre_id')
+                .where('genres.name', genre);
+        }
+
+        // Exact-match filters, e.g. ?artist=Pink Floyd
         for (const [key, value] of Object.entries(filters)) {
             if (ALBUM_FILTERABLE.includes(key)) {
-                query = query.where(key, value);
+                query = query.where(`albums.${key}`, value);
             }
         }
 
         // Case-insensitive free-text search across name + artist, e.g. ?search=floyd
         if (search) {
             query = query.where(builder =>
-                builder.whereILike('albumName', `%${search}%`)
-                    .orWhereILike('artist', `%${search}%`)
+                builder.whereILike('albums.albumName', `%${search}%`)
+                    .orWhereILike('albums.artist', `%${search}%`)
             );
         }
 
         // Sorting, e.g. ?sortBy=albumsSold&order=desc
         if (sortBy && ALBUM_SORTABLE.includes(sortBy)) {
             const dir = order === 'desc' ? 'desc' : 'asc';
-            query = query.orderBy(sortBy, dir);
+            query = query.orderBy(`albums.${sortBy}`, dir);
         }
 
-        const albums = await query.select()
+        // Select only album columns so the join tables don't leak into the response.
+        const albums = await query.select('albums.*')
         res.status(200).json(albums)
     } catch (error) {
         console.error('Database error:', error)
@@ -159,14 +207,20 @@ app.get('/albums/:id', async (req, res) => {
     }
 });
 
+// Genres that have at least one album, for filter/search UIs. Returns objects
+// { name, isCanonical } so the client can segment the curated taxonomy from
+// user-contributed genres. ?canonical=true narrows to the canonical set only.
 app.get('/api/v1/genres', async (req, res) => {
     try {
-        const genres = await database('albums')
-            .distinct('genre')
-            .whereNotNull('genre')
-            .orderBy('genre', 'asc')
-            .pluck('genre');
-        res.status(200).json(genres);
+        let query = database('genres')
+            .join('album_genres', 'genres.id', 'album_genres.genre_id')
+            .distinct('genres.name', 'genres.is_canonical')
+            .orderBy('genres.name', 'asc');
+        if (req.query.canonical === 'true') {
+            query = query.where('genres.is_canonical', true);
+        }
+        const rows = await query.select();
+        res.status(200).json(rows.map(r => ({ name: r.name, isCanonical: r.is_canonical })));
     } catch (error) {
         console.error('Error fetching genres:', error);
         res.status(500).json({ error: error.message });
@@ -180,23 +234,35 @@ app.get('/api/v1/genres', async (req, res) => {
 app.get('/api/v1/albums/by-genre', async (req, res) => {
     const limit = Math.min(parseInt(req.query.limit) || 20, 50);
     try {
+        // Top-N albums per canonical genre, capped in SQL via a window over the
+        // album_genres join. Restricted to is_canonical genres so user-contributed
+        // genres never auto-promote into homepage carousels (they stay filterable via
+        // /albums?genre=X). An album with multiple genres appears in each of its
+        // canonical genre groups. `genre_name` is the canonical name; the row also
+        // still carries the album's legacy `genre` string from albums.*.
         const ranked = await database
             .with('ranked', database.raw(
-                `SELECT *, ROW_NUMBER() OVER (PARTITION BY genre ORDER BY "albumName" ASC) AS rn
-                 FROM albums WHERE genre IS NOT NULL`))
+                `SELECT a.*, g.name AS genre_name,
+                        ROW_NUMBER() OVER (PARTITION BY g.id ORDER BY a."albumName" ASC) AS rn
+                 FROM albums a
+                 JOIN album_genres ag ON ag.album_id = a.id
+                 JOIN genres g ON g.id = ag.genre_id
+                 WHERE g.is_canonical = true`))
             .select('*').from('ranked').where('rn', '<=', limit)
-            .orderBy(['genre', 'albumName']);
+            .orderBy(['genre_name', 'albumName']);
 
         const byGenre = new Map();
         const grouped = [];
         for (const row of ranked) {
-            if (!byGenre.has(row.genre)) {
-                const entry = { genre: row.genre, albums: [] };
-                byGenre.set(row.genre, entry);
+            const genreName = row.genre_name;
+            if (!byGenre.has(genreName)) {
+                const entry = { genre: genreName, albums: [] };
+                byGenre.set(genreName, entry);
                 grouped.push(entry);
             }
             delete row.rn;
-            byGenre.get(row.genre).albums.push(row);
+            delete row.genre_name;
+            byGenre.get(genreName).albums.push(row);
         }
         res.status(200).json(grouped);
     } catch (error) {
@@ -214,9 +280,17 @@ app.post('/add-stack', checkJwt, requirePermission('create_album'), async (req, 
         return res.status(400).json({ error: message })
     }
     try {
+        // `genres` is a virtual field (no such column) — pull it out before insert.
+        // A user submission carries genres[]; fall back to the single `genre` string.
+        const { genres, ...albumData } = result.data;
+        const genreNames = genres?.length ? genres : (albumData.genre ? [albumData.genre] : []);
+        // Keep the legacy `genre` column populated for back-compat / human reference.
+        if (!albumData.genre) albumData.genre = genreNames.map(canonicalizeName).join(', ');
+
         const postedAlbum = await database('albums')
-            .insert({ ...result.data, id: randomUUID(), created_by: req.auth.sub })
+            .insert({ ...albumData, id: randomUUID(), created_by: req.auth.sub })
             .returning('*')
+        await setAlbumGenres(postedAlbum[0].id, genreNames)
         res.status(201).json(postedAlbum[0])
     } catch (error) {
         console.error('Error posting your record :(', error)
@@ -272,6 +346,8 @@ app.get('/api/cron/import-albums', async (req, res) => {
             const [inserted] = await database('albums')
                 .insert({ ...result.data, id: randomUUID(), created_by: process.env.CRON_AUTHOR_SUB })
                 .returning('*');
+            // Cron genre is one compound Discogs string — split it before linking.
+            await setAlbumGenres(inserted.id, parseGenres(inserted.genre));
             return res.status(201).json({ added: inserted.albumName, rank: candidate.rank, skipped });
         }
 
@@ -310,10 +386,18 @@ app.patch('/albums/:id', checkJwt, async (req, res) => {
             return res.status(403).json({ error: 'Insufficient permissions.' });
         }
 
+        // `genres` is virtual (no column) — keep it out of the column update and use
+        // it to re-link instead. `genre` (single string) edits also re-sync the links.
+        const { genres, ...columnUpdates } = updates;
         const updated = await database('albums')
             .where('id', albumId)
-            .update({ ...updates, updated_at: new Date() })
+            .update({ ...columnUpdates, updated_at: new Date() })
             .returning('*');
+        if (genres?.length) {
+            await setAlbumGenres(albumId, genres);
+        } else if (Object.prototype.hasOwnProperty.call(updates, 'genre')) {
+            await setAlbumGenres(albumId, updated[0].genre ? [updated[0].genre] : []);
+        }
         res.status(200).json(updated[0]);
     } catch (error) {
         res.status(500).json({ error: error.message });
