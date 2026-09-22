@@ -14,6 +14,7 @@ const { loadAlbumList } = require('./albumList');
 const { fetchAlbumArticle } = require('./wikipedia');
 const { enrichAlbum } = require('./enrich');
 const { parseGenres, canonicalizeName, genreSlug } = require('./genres');
+const { filterStackItems } = require('./stackFilter');
 const rateLimit = require('express-rate-limit');
 
 // Sets an album's genres from a list of genre names and (re)writes the album_genres
@@ -683,15 +684,28 @@ app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
 app.get('/api/v1/stacks', checkJwt, async (req, res) => {
     try {
         const email = getAuthEmail(req);
-        const albums = await database('users').where('email', email).select('mystack')
-        if (!albums.length) {
-            res.status(201).json('No stack to display')
+        const { search, genre, sortBy, order, page, limit } = req.query;
+        const hasFilterParams = search || genre || sortBy || order || page || limit;
+
+        const rows = await database('users').where('email', email).select('mystack');
+
+        if (!hasFilterParams) {
+            // Unchanged legacy behavior/shape/status - App.js's initial preload and
+            // mystack_spec.cy.js / recordpage_spec.cy.js fixtures (frontend repo)
+            // depend on this exact [{ mystack: [...] }] / 201 contract.
+            if (!rows.length) return res.status(201).json('No stack to display');
+            return res.status(201).json(rows);
         }
-        else {
-            res.status(201).json(albums)
-        }
+
+        const items = filterStackItems(rows[0]?.mystack ?? [], {
+            search, genre, sortBy, order, page, limit,
+            pageSizeDefault: ALBUM_PAGE_SIZE_DEFAULT,
+            pageSizeMax: ALBUM_PAGE_SIZE_MAX,
+        });
+        res.status(200).json(items);
     }
-    catch {
+    catch (error) {
+        console.error('Error fetching stack:', error);
         res.status(500).json({ error: 'Could not get user stack' })
     }
 })
