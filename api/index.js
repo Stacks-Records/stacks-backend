@@ -237,14 +237,16 @@ app.get('/albums', async (request, res) => {
         const { sortBy, order, search, genre, ...filters } = request.query;
         let query = database('albums');
 
-        // Genre now lives in the join table. ?genre=Rock (single), repeated
-        // ?genre=Rock&genre=Pop (Express/qs already arrays repeated keys), and a
-        // comma-joined ?genre=Rock,Pop are all accepted and OR'd together — an album
-        // matching any selected genre is included. A subquery (not a join on the
-        // outer query) so an album matching more than one selected genre still comes
-        // back as a single row, with no DISTINCT needed.
+        // Genre now lives in the join table. ?genre=Rock (single) and repeated
+        // ?genre=Rock&genre=Pop (Express/qs already arrays repeated keys) are OR'd
+        // together — an album matching any selected genre is included. Deliberately
+        // NOT comma-split: several canonical genre names contain a literal comma
+        // ("Folk, World, & Country"), so splitting on ',' shreds a single selected
+        // genre into fragments that match nothing. The frontend always sends one
+        // `genre` param per selection, never a comma-joined value. A subquery (not a
+        // join on the outer query) so an album matching more than one selected genre
+        // still comes back as a single row, with no DISTINCT needed.
         const genreList = [].concat(genre ?? [])
-            .flatMap(g => g.split(','))
             .map(g => g.trim())
             .filter(Boolean);
         if (genreList.length) {
