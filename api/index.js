@@ -7,15 +7,15 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
-const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('./permissions');
-const { albumSchema, preferencesSchema, reorderSchema } = require('./validation');
+const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('../lib/permissions');
+const { albumSchema, preferencesSchema, reorderSchema } = require('../lib/validation');
 const { randomUUID } = require('node:crypto');
-const { loadAlbumList } = require('./albumList');
-const { fetchAlbumArticle } = require('./wikipedia');
-const { enrichAlbum } = require('./enrich');
-const { parseGenres, canonicalizeName, genreSlug } = require('./genres');
-const { filterStackItems } = require('./stackFilter');
-const { applyStackOrder } = require('./stackOrder');
+const { loadAlbumList } = require('../lib/albumList');
+const { fetchAlbumArticle } = require('../lib/wikipedia');
+const { enrichAlbum } = require('../lib/enrich');
+const { parseGenres, canonicalizeName, genreSlug } = require('../lib/genres');
+const { filterStackItems } = require('../lib/stackFilter');
+const { applyStackOrder } = require('../lib/stackOrder');
 const rateLimit = require('express-rate-limit');
 
 // Sets an album's genres from a list of genre names and (re)writes the album_genres
@@ -672,7 +672,7 @@ app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
 })
 
 // Persists a manual (drag-and-drop) reorder. `order` may be only the ids the
-// client has loaded; see api/stackOrder.js for the subset semantics.
+// client has loaded; see lib/stackOrder.js for the subset semantics.
 app.patch('/api/v1/stacks/reorder', checkJwt, async (req, res) => {
     try {
         const email = getAuthEmail(req);

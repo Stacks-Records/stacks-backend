@@ -11,7 +11,7 @@
 //      genre string. The legacy albums.genre column is left in place as the source
 //      of truth for re-runs and as a fallback; it is no longer read by the app.
 
-const { CANONICAL_GENRES, parseGenres, genreSlug } = require('../../api/genres');
+const { CANONICAL_GENRES, parseGenres, genreSlug } = require('../../lib/genres');
 
 /**
  * @param { import("knex").Knex } knex

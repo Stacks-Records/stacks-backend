@@ -59,7 +59,7 @@ relative to `api/`). The app reads the following:
 
 Most write endpoints require an Auth0 **Bearer token** (`Authorization` header)
 and an `Email` header identifying the user. Access is governed by a role-based
-permission model (`api/permissions.js`):
+permission model (`lib/permissions.js`):
 
 | Role | view | create | edit | delete | manage users |
 | --- | :---: | :---: | :---: | :---: | :---: |
