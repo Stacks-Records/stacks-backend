@@ -53,4 +53,13 @@ const preferencesSchema = z.custom(
     { message: 'preferences payload is too large (max 10KB)' }
 );
 
-module.exports = { albumSchema, preferencesSchema };
+// Manual stack reorder: array position is the rank. May be a subset of the stack
+// (see api/stackOrder.js). The max is an abuse cap, far above any real stack.
+const reorderSchema = z.object({
+    order: z.array(z.string().trim().min(1, 'order ids must be non-empty strings'))
+        .min(1, 'order must contain at least one id')
+        .max(1000, 'order may contain at most 1000 ids')
+        .refine(ids => new Set(ids).size === ids.length, 'order must not contain duplicate ids'),
+});
+
+module.exports = { albumSchema, preferencesSchema, reorderSchema };
