@@ -1,6 +1,6 @@
 'use strict';
 
-const { albumSchema, preferencesSchema } = require('./validation');
+const { albumSchema, preferencesSchema, reorderSchema } = require('./validation');
 
 const validAlbum = {
     albumName: 'OK Computer',
@@ -70,5 +70,36 @@ describe('preferencesSchema', () => {
     test('rejects a payload larger than 10KB', () => {
         const oversized = { blob: 'x'.repeat(10_001) };
         expect(preferencesSchema.safeParse(oversized).success).toBe(false);
+    });
+});
+
+describe('reorderSchema', () => {
+    test('accepts a list of unique ids', () => {
+        expect(reorderSchema.safeParse({ order: ['1', '2', '3'] }).success).toBe(true);
+    });
+
+    test('rejects a missing order', () => {
+        expect(reorderSchema.safeParse({}).success).toBe(false);
+    });
+
+    test('rejects an empty order', () => {
+        expect(reorderSchema.safeParse({ order: [] }).success).toBe(false);
+    });
+
+    test('rejects non-string ids', () => {
+        expect(reorderSchema.safeParse({ order: ['1', 2] }).success).toBe(false);
+    });
+
+    test('rejects empty-string ids', () => {
+        expect(reorderSchema.safeParse({ order: ['1', '  '] }).success).toBe(false);
+    });
+
+    test('rejects duplicate ids', () => {
+        expect(reorderSchema.safeParse({ order: ['1', '2', '1'] }).success).toBe(false);
+    });
+
+    test('rejects more than 1000 ids', () => {
+        const order = Array.from({ length: 1001 }, (_, i) => String(i));
+        expect(reorderSchema.safeParse({ order }).success).toBe(false);
     });
 });
