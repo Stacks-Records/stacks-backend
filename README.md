@@ -59,7 +59,7 @@ relative to `api/`). The app reads the following:
 
 Most write endpoints require an Auth0 **Bearer token** (`Authorization` header)
 and an `Email` header identifying the user. Access is governed by a role-based
-permission model (`api/permissions.js`):
+permission model (`lib/permissions.js`):
 
 | Role | view | create | edit | delete | manage users |
 | --- | :---: | :---: | :---: | :---: | :---: |
@@ -142,20 +142,27 @@ permission model (`api/permissions.js`):
 #### Add to User Stack
 - **Endpoint**: `/api/v1/stacks`
 - **Method**: `PATCH`
-- **Auth**: Bearer token, requires `create_album` permission.
-- **Description**: Adds a favorited album to the user's stack. Body: `{ email, newAlbum }`.
+- **Auth**: Bearer token, requires `create_album` permission. The user is identified from the token's verified email.
+- **Description**: Adds a favorited album to the user's stack. Body: `{ newAlbum }`. An `email` field is ignored if sent.
 
 #### Delete from User Stack
 - **Endpoint**: `/api/v1/stacks/delete`
 - **Method**: `PATCH`
-- **Auth**: Bearer token.
-- **Description**: Remove a favorited album from the user's stack. Body: `{ email, albumToDelete }`.
+- **Auth**: Bearer token. The user is identified from the token's verified email.
+- **Description**: Remove a favorited album from the user's stack. Body: `{ albumToDelete }`. An `email` field is ignored if sent.
+
+#### Reorder User Stack
+- **Endpoint**: `/api/v1/stacks/reorder`
+- **Method**: `PATCH`
+- **Auth**: Bearer token. The user is identified from the token's verified email.
+- **Description**: Saves a manual (drag-and-drop) order. Body: `{ "order": ["<albumId>", ...] }`, a list of unique album ids from the user's stack, in the desired order. `order` can be just the ids the client has loaded: the positions those ids currently hold are refilled in `order`'s sequence, and every other album stays where it is.
+- **Responses**: `200 { user: { mystack } }` · `400` invalid body · `401` no verified email in token · `404` user not found · `409 { error, missing }` one or more ids aren't in the stack (refetch and retry).
 
 #### Get User Stack
 - **Endpoint**: `/api/v1/stacks`
 - **Method**: `GET`
-- **Auth**: Bearer token + `Email` header.
-- **Description**: Get the user's favorited albums.
+- **Auth**: Bearer token. The user is identified from the token's verified email.
+- **Description**: Get the user's favorited albums, in their saved order unless `sortBy` is given.
 
 ### Health Check
 

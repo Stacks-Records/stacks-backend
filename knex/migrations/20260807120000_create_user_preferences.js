@@ -5,7 +5,7 @@
 // stay separate from user-generated settings, and stored as a single jsonb
 // blob rather than discrete columns since the set of preference keys is
 // owned by the frontend and will keep changing; the API only enforces
-// size/shape, not specific keys (see preferencesSchema in api/validation.js).
+// size/shape, not specific keys (see preferencesSchema in lib/validation.js).
 
 /**
  * @param { import("knex").Knex } knex

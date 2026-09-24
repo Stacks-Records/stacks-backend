@@ -7,14 +7,15 @@ require('dotenv').config({ path: path.resolve(__dirname, '../.env') })
 const configuration = require('../knexfile.js')[process.env.NODE_ENV || 'development']
 const database = require('knex')(configuration);
 const { auth } = require('express-oauth2-jwt-bearer');
-const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('./permissions');
-const { albumSchema, preferencesSchema } = require('./validation');
+const { hasPermission, canPerformAction, PERMISSIONS, USER_ROLES, resolveRole } = require('../lib/permissions');
+const { albumSchema, preferencesSchema, reorderSchema } = require('../lib/validation');
 const { randomUUID } = require('node:crypto');
-const { loadAlbumList } = require('./albumList');
-const { fetchAlbumArticle } = require('./wikipedia');
-const { enrichAlbum } = require('./enrich');
-const { parseGenres, canonicalizeName, genreSlug } = require('./genres');
-const { filterStackItems } = require('./stackFilter');
+const { loadAlbumList } = require('../lib/albumList');
+const { fetchAlbumArticle } = require('../lib/wikipedia');
+const { enrichAlbum } = require('../lib/enrich');
+const { parseGenres, canonicalizeName, genreSlug } = require('../lib/genres');
+const { filterStackItems } = require('../lib/stackFilter');
+const { applyStackOrder } = require('../lib/stackOrder');
 const rateLimit = require('express-rate-limit');
 
 // Sets an album's genres from a list of genre names and (re)writes the album_genres
@@ -237,14 +238,16 @@ app.get('/albums', async (request, res) => {
         const { sortBy, order, search, genre, ...filters } = request.query;
         let query = database('albums');
 
-        // Genre now lives in the join table. ?genre=Rock (single), repeated
-        // ?genre=Rock&genre=Pop (Express/qs already arrays repeated keys), and a
-        // comma-joined ?genre=Rock,Pop are all accepted and OR'd together — an album
-        // matching any selected genre is included. A subquery (not a join on the
-        // outer query) so an album matching more than one selected genre still comes
-        // back as a single row, with no DISTINCT needed.
+        // Genre now lives in the join table. ?genre=Rock (single) and repeated
+        // ?genre=Rock&genre=Pop (Express/qs already arrays repeated keys) are OR'd
+        // together — an album matching any selected genre is included. Deliberately
+        // NOT comma-split: several canonical genre names contain a literal comma
+        // ("Folk, World, & Country"), so splitting on ',' shreds a single selected
+        // genre into fragments that match nothing. The frontend always sends one
+        // `genre` param per selection, never a comma-joined value. A subquery (not a
+        // join on the outer query) so an album matching more than one selected genre
+        // still comes back as a single row, with no DISTINCT needed.
         const genreList = [].concat(genre ?? [])
-            .flatMap(g => g.split(','))
             .map(g => g.trim())
             .filter(Boolean);
         if (genreList.length) {
@@ -612,13 +615,14 @@ app.patch('/api/v1/users/:id/role', checkJwt, requirePermission('manage_users'),
 })
 
 //post route for users table adding an album to mystacks
-
+// The user is always the JWT's verified identity (resolved into req.user by
+// requirePermission). Any `email` the client still sends in the body is ignored —
+// trusting it would let a caller edit someone else's stack.
 app.patch('/api/v1/stacks', checkJwt, requirePermission('create_album'), async (req, res) => {
     try {
-        const { email, newAlbum } = req.body;
-        const user = await database('users').select('*').where('email', '=', email)
-        const userID = user[0].id
-        const foundRecord = user[0].mystack.find(album => album.id === newAlbum.id)
+        const { newAlbum } = req.body;
+        const userID = req.user.id
+        const foundRecord = (req.user.mystack ?? []).find(album => album.id === newAlbum.id)
         if (!foundRecord) {
             await database('users')
                 .where('id', userID)
@@ -638,28 +642,14 @@ app.patch('/api/v1/stacks', checkJwt, requirePermission('create_album'), async (
     }
 })
 
-// app.patch('/api/v1/stacks/:userId', checkJwt, async (req, res) => {
-//     try {
-//         const { userId } = req.params
-//         const { albumId } = req.body
-//         if(!userId || !albumId) {
-//             res.status(400).json('User ID or Album ID not found.') 
-//         }
-//         const newAlbum = await database('user_albums').where('userId', '=', userId).select('*')
-//             .update({
-//                 albumId: database.raw('array_append(albumId, ?::text)', [JSON.stringify(albumId)])
-//             })
-//           res.status(201).json({ message:'Album added to stack!', id: newAlbum })
-//     }
-//     catch(err) {
-//         console.error('Error updating stack:', err)
-//         res.status(500).json({error: 'Could not add album due to internal error.'})
-//     }
-// })
+// Identity comes from the JWT, never the body (see the add route above).
 app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
     try {
-        const { email, albumToDelete } = req.body;
+        const email = getAuthEmail(req);
+        if (!email) return res.status(401).json({ error: 'Authenticated email required.' });
+        const { albumToDelete } = req.body;
         const user = await database('users').select('*').where('email', '=', email)
+        if (!user.length) return res.status(404).json({ error: 'User not found.' });
         const userID = user[0].id
         const foundRecord = user[0].mystack.find(album => album.id === albumToDelete.id)
         if (foundRecord) {
@@ -678,6 +668,43 @@ app.patch('/api/v1/stacks/delete', checkJwt, async (req, res) => {
     catch (error) {
         console.error('Error updating stack:', error);
         res.status(500).json({ error: 'Could not remove album to stack' })
+    }
+})
+
+// Persists a manual (drag-and-drop) reorder. `order` may be only the ids the
+// client has loaded; see lib/stackOrder.js for the subset semantics.
+app.patch('/api/v1/stacks/reorder', checkJwt, async (req, res) => {
+    try {
+        const email = getAuthEmail(req);
+        if (!email) return res.status(401).json({ error: 'Authenticated email required.' });
+
+        const parsed = reorderSchema.safeParse(req.body);
+        if (!parsed.success) {
+            return res.status(400).json({ error: parsed.error.issues.map(i => i.message).join(', ') });
+        }
+
+        // Read-modify-write under a row lock so concurrent reorders/adds/deletes
+        // can't overwrite each other.
+        const result = await database.transaction(async (trx) => {
+            const user = await trx('users').where('email', email).forUpdate().first();
+            if (!user) return { status: 404, body: { error: 'User not found.' } };
+
+            const { stack, missing } = applyStackOrder(user.mystack ?? [], parsed.data.order);
+            if (missing) {
+                return { status: 409, body: { error: 'Some albums are no longer in your stack.', missing } };
+            }
+
+            const [updated] = await trx('users')
+                .where('id', user.id)
+                .update({ mystack: stack })
+                .returning('mystack');
+            return { status: 200, body: { user: { mystack: updated.mystack } } };
+        });
+        res.status(result.status).json(result.body);
+    }
+    catch (error) {
+        console.error('Error reordering stack:', error);
+        res.status(500).json({ error: 'Could not reorder stack' })
     }
 })
 
